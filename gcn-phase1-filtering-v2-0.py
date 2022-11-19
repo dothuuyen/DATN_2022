@@ -28,6 +28,15 @@ import torch.nn.functional as F
 from models import build_model
 from label_probagation import label_probagation_GCN, label_probagation_GTN
 
+def seed_everything(seed):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+
 def arg_parser():
     parser = argparse.ArgumentParser(description='PyTorch Action recognition Training')
 
@@ -82,6 +91,8 @@ def arg_parser():
     parser.add_argument('--no_imagenet_pretrained', dest='imagenet_pretrained',
                         action='store_false',
                         help='disable to load imagenet model')
+    parser.add_argument('--seed', default=2022, type=int,
+                        help='Training seed')
 
     # data-related
     parser.add_argument('--train_folder', metavar='DIR', help='path to dataset file list')
@@ -185,7 +196,7 @@ def load_images_and_label(filenames, image_size, local_transform, normalize_tran
 
     for i, fname in enumerate(filenames):
         img = cv2.imread(fname)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) #BGR to RGB
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         #if local_transform is not None:
             #res = local_transform(image=img)
@@ -317,6 +328,7 @@ def evaluate_fn(net, data_loader, device):
         y_true = data[1].to(device).long()
 
         y_pred, fts = net(x, True)
+        #print(np.mean(y_pred.detach().cpu().numpy()))        
 
         bce_loss += loss_fn(y_pred, y_true).item()
         y_pred = torch.nn.functional.softmax(y_pred, dim=-1)
@@ -333,7 +345,7 @@ def evaluate_fn(net, data_loader, device):
     print("\t Valid BCE: %.4f" % (bce_loss))
     return bce_loss, labels, np.array(outputs), np.array(output_fts)
 
-def train_model(model, train_files, train_labels, device, epochs=2):
+def train_model(model, train_files, train_labels, device, epochs=10):
     train_dataset = VideoDataset(train_files,
                                  train_labels,
                                  8,
@@ -342,7 +354,7 @@ def train_model(model, train_files, train_labels, device, epochs=2):
                                  split='test',
                                  seed=2022)
 
-    train_loader = DataLoader(train_dataset, batch_size=2,
+    train_loader = DataLoader(train_dataset, batch_size=4,
                               shuffle=True,
                               num_workers=2)
 
@@ -382,7 +394,7 @@ def test_model(model, test_files, device):
     best_C = None
     best_f1_score = -1
 
-    for t in range(0, 100, 1):
+    for t in range(45, 65, 1):
         output_y = np.zeros_like(y)
         output_y[y >= t*0.01] = 1
         f1 = metrics.f1_score(labels, output_y)
@@ -399,8 +411,8 @@ def create_graph(file_names, output_proba, outputs_fts, model_gnn):
     N = len(file_names)
     video_name = file_names[0]['video_name']
     position = [(a['start_frame_idx'], a['end_frame_idx']) for a in file_names]
-    low_p = np.percentile(output_proba[:, 1], 50)
-    high_p = np.percentile(output_proba[:, 1], 80)
+    low_p = np.percentile(output_proba[:, 1], 20)
+    high_p = np.percentile(output_proba[:, 1], 95)
 
     # Create label and train mask
     labels = []
@@ -509,15 +521,14 @@ def filtering_week_supervised(model, train_files, test_files, device, percentile
     print("Get raw train outputs ")
     _, labels, outputs, outputs_fts = evaluate_fn(model, raw_train_loader, device)
     probagation_labels = create_filtering_graph(train_files, outputs, outputs_fts, model_gnn)
+    print(outputs.shape, probagation_labels.shape)
+    print(np.min(probagation_labels), np.mean(probagation_labels), np.max(probagation_labels))
 
-    print(np.mean(outputs[:, 1]), np.mean(probagation_labels))
 
-    # raw_p = outputs[:, 1] + 0.1*probagation_labels
-    raw_p = outputs[:, 1]
-    for t in range(0, 100, 10):
-        print(t, ' -> ', np.percentile(raw_p, percentile))
+    raw_p = outputs[:, 1] + 0.1*probagation_labels
     threshold = np.percentile(raw_p, percentile)
     print("Threshold = ", threshold)
+    print(np.mean(outputs[:, 1]), np.mean(probagation_labels))
 
     # Step 3: Create noisy labels
     noisy_labels = []
@@ -525,10 +536,9 @@ def filtering_week_supervised(model, train_files, test_files, device, percentile
         data = train_files[i]
         video_name = data['video_name']
 
-        #if 'Train' in video_name:
-        #    tmp_label = 0
-        #else:
-        if True:
+        if 'Train' in video_name:
+            tmp_label = 0
+        else:
             if raw_p[i] > threshold:
                 tmp_label = 1
             else:
@@ -563,6 +573,7 @@ if __name__ == "__main__":
     #                      '--groups', '8', '--no_imagenet_pretrained'])
 
     args = parser.parse_args()
+    seed_everything(args.seed)
 
     TRAIN_FOLDER = args.train_folder
     TEST_FOLDER = args.test_folder
@@ -594,8 +605,8 @@ if __name__ == "__main__":
 
     device = 'cuda'
     use_model = args.use_model
-    for t in range(1):
-        filtering_week_supervised(model, train_files, test_files, device, 0.8, use_model)
+    for t in range(2):
+        filtering_week_supervised(model, train_files, test_files, device, 0.5, use_model)
 
 
 
