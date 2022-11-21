@@ -5,7 +5,7 @@ import random
 import cv2
 import glob
 import torch
-import os
+import pandas as pd
 from torch.utils.data import DataLoader
 from torchvision.transforms import Normalize
 import torch.optim as optim
@@ -20,8 +20,6 @@ import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
-import torchvision.transforms as transforms
-from tqdm import tqdm
 
 import torch.nn.functional as F
 
@@ -69,7 +67,7 @@ def arg_parser():
     # training setting
     parser.add_argument('--use_model', default='none', type=str,
                         help='Filtering model',
-                        choices=['none', 'gcn', 'gtn'])
+                        choices=['baseline', 'none', 'gcn', 'gtn'])
 
     parser.add_argument('-b', '--batch-size', default=8, type=int,
                         metavar='N', help='mini-batch size (default: 256)')
@@ -107,10 +105,12 @@ def arg_parser():
                         choices=['rgb', 'flow'])
 
     # logging
-    parser.add_argument('--logdir', default='', type=str, help='log path')
+    parser.add_argument('--logdir', default='./', type=str, help='log path')
     parser.add_argument('--print-freq', default=100, type=int,
                         help='frequency to print the log during the training')
 
+    parser.add_argument('--n_filters', default=1, type=int,
+                        help='Number of filters')
     # for testing and validation
 
     return parser
@@ -121,8 +121,11 @@ def get_train_files(input_folder, n_frames, step=None, prefix='Train'):
 
     folder_level1 = sorted(os.listdir(input_folder))
     output = []
+    output_test = []
     for folder_name in folder_level1:
         if prefix in folder_name:
+            _i = np.random.randint(5)
+
             filenames = sorted(glob.glob("%s/%s/*.tif" % (input_folder, folder_name)))
             basename = [os.path.basename(f) for f in filenames]
 
@@ -131,7 +134,16 @@ def get_train_files(input_folder, n_frames, step=None, prefix='Train'):
             start = 0
             while start + n_frames < len(filenames):
                 list_files = filenames[start:start + n_frames]
-                output += [{'list_files': list_files,
+                if _i >= 0:
+                    output += [{'list_files': list_files,
+                           'start_frame_idx': start,
+                           'end_frame_idx': start+ n_frames - 1,
+                           'prefix': prefix,
+                           'label': 0,
+                           'video_name': folder_name
+                           }]
+                else:
+                    output_test += [{'list_files': list_files,
                            'start_frame_idx': start,
                            'end_frame_idx': start+ n_frames - 1,
                            'prefix': prefix,
@@ -141,20 +153,20 @@ def get_train_files(input_folder, n_frames, step=None, prefix='Train'):
                 start += step if step is not None else n_frames
             
             
-    return output
+    return output, output_test
 
 def get_gt_label(filenames, threshold = 0.2):
     cnt = 0
     
     for i, fname in enumerate(filenames):
         img = np.float32(cv2.imread(fname, 0))/255.
-        if np.sum(img) > 0.001:
+        if np.sum(img) > 0.1:
             cnt += 1
             
     return int(cnt >= 0.2*len(filenames))
 
 
-def get_test_files(input_folder, n_frames, step=None, prefix='Test', train_split=[1,2,3,4,5]):
+def get_test_files(input_folder, n_frames, step=None, prefix='Test', train_split=None):
 
     folder_level1 = sorted(os.listdir(input_folder))
     output_trains, output_tests = [], []
@@ -162,6 +174,7 @@ def get_test_files(input_folder, n_frames, step=None, prefix='Test', train_split
     for folder_name in folder_level1:
         if (prefix in folder_name) and ('gt' not in folder_name):
             test_id = int(folder_name[-3:])
+            _i = np.random.randint(3)
             print(test_id)
             filenames = sorted(glob.glob("%s/%s/*.tif" % (input_folder, folder_name)))
             gt_filenames = sorted(glob.glob("%s/%s_gt/*.bmp" % (input_folder, folder_name)))
@@ -181,7 +194,7 @@ def get_test_files(input_folder, n_frames, step=None, prefix='Test', train_split
                            }
                 start += step if step is not None else n_frames
                 
-                if test_id in train_split:
+                if _i >= 2:
                     output_trains += [data]
                 else:
                     output_tests += [data]
@@ -229,18 +242,6 @@ class VideoDataset(Dataset):
 
         self.transform = None
         self.normalize_transform = normalize_transform
-        if self.split == 'train':
-            self.transform = albumentations.Compose([
-                            Rotate((-15., 15.), p=0.5),
-                            ShiftScaleRotate(p=0.3, scale_limit=0.25, border_mode=1),
-                            HorizontalFlip(p=0.2),
-                            RandomBrightnessContrast(p=0.5, brightness_limit=0.5, contrast_limit=0.5),
-                            GaussNoise(p=0.2),
-                            albumentations.OneOf([
-                            RandomGamma(gamma_limit=(60, 120), p=1.),
-                            HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15, val_shift_limit=20, p=1.)
-                            ], p=0.2)
-                            ])
 
     def __getitem__(self, index):
         filenames = self.video_imgs[index]['list_files']
@@ -299,6 +300,7 @@ def train_loop_fn(net, loader, optimizer, scheduler, device):
 
         loss = loss_fn(output, data[1].to(device).long())
         loss.backward()
+        # torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         optimizer.step()
 
         n_iter += 1
@@ -310,7 +312,7 @@ def train_loop_fn(net, loader, optimizer, scheduler, device):
         if scheduler is not None:
             scheduler.step()
 
-    return sum_loss / n_iter
+    return sum_loss
 
 def evaluate_fn(net, data_loader, device):
     bce_loss = 0
@@ -358,7 +360,7 @@ def train_model(model, train_files, train_labels, device, epochs=10):
                               shuffle=True,
                               num_workers=2)
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = optim.SGD(model.parameters(), lr=1e-4)
     scheduler = None
 
     for ii in range(epochs):
@@ -393,8 +395,9 @@ def test_model(model, test_files, device):
     print("AUC: ", auc)
     best_C = None
     best_f1_score = -1
+    best_t = 0.5
 
-    for t in range(45, 65, 1):
+    for t in range(50, 51, 1):
         output_y = np.zeros_like(y)
         output_y[y >= t*0.01] = 1
         f1 = metrics.f1_score(labels, output_y)
@@ -405,7 +408,29 @@ def test_model(model, test_files, device):
 
     print('F1-Score = ', best_f1_score)
     print('Accuracy = ', 1.0 * (best_C[0][0] + best_C[1][1]) / np.sum(best_C))
-    print(best_C)
+
+    output_y = np.zeros_like(y)
+    output_y[y >= best_t] = 1
+
+    video_names = []
+    start_frames = []
+    labels = []
+    predicted_labels = []
+    for i in range(len(test_files)):
+        video_names += [test_files[i]['video_name']]
+        start_frames += [test_files[i]['start_frame_idx']]
+        labels += [test_files[i]['label']]
+        predicted_labels += [output_y[i]]
+
+    df = pd.DataFrame({
+        'video_name': video_names,
+        'start_frame': start_frames,
+        'labels': labels,
+        'predicted_label': predicted_labels
+    })
+
+    df.to_csv('predicted.csv', index=False)
+
 
 def create_graph(file_names, output_proba, outputs_fts, model_gnn):
     N = len(file_names)
@@ -500,6 +525,7 @@ def create_filtering_graph(train_files, outputs, outputs_fts, model_gnn):
 
     return np.array(probagation_label)
 
+
 def filtering_week_supervised(model, train_files, test_files, device, percentile=0.8, model_gnn=None):
     # Step 1: Create base dataset (train with no shuffle)
     train_labels = [a['label'] for a in train_files]
@@ -522,10 +548,10 @@ def filtering_week_supervised(model, train_files, test_files, device, percentile
     _, labels, outputs, outputs_fts = evaluate_fn(model, raw_train_loader, device)
     probagation_labels = create_filtering_graph(train_files, outputs, outputs_fts, model_gnn)
     print(outputs.shape, probagation_labels.shape)
-    print(np.min(probagation_labels), np.mean(probagation_labels), np.max(probagation_labels))
+    print('Probagation labels = ', np.min(probagation_labels), np.mean(probagation_labels), np.max(probagation_labels))
+    print('Raw labels = ', np.min(outputs[:, 1]), np.max(outputs[:, 1]))
 
-
-    raw_p = outputs[:, 1] + 0.1*probagation_labels
+    raw_p = 0.5*outputs[:, 1] + 0.5*probagation_labels
     threshold = np.percentile(raw_p, percentile)
     print("Threshold = ", threshold)
     print(np.mean(outputs[:, 1]), np.mean(probagation_labels))
@@ -546,14 +572,53 @@ def filtering_week_supervised(model, train_files, test_files, device, percentile
 
         noisy_labels += [tmp_label]
 
-    print("Got %i 0-labels, %i 1-label" % (len(noisy_labels) - sum(noisy_labels),
-                                           sum(noisy_labels)))
+    #print("Got %i 0-labels, %i 1-label" % (len(noisy_labels) - sum(noisy_labels),
+    #                                       sum(noisy_labels)))
 
-    print('Confusion matrix on train data: ')
-    print(metrics.confusion_matrix(train_labels, noisy_labels))
+    #print('Confusion matrix on train data: ')
+    #print(metrics.confusion_matrix(train_labels, noisy_labels))
 
     # Step 4: Run training with noisy labels
-    train_model(model, train_files, noisy_labels, device, epochs=1)
+    train_model(model, train_files, noisy_labels, device, epochs=2)
+    test_model(model, test_files, device)
+
+
+def run_baseline(model, train_files, test_files, device):
+    # Step 1: Create base dataset (train with no shuffle)
+    train_labels = [a['label'] for a in train_files]
+    print("Train labels: Got %i 0-labels, %i 1-label" % (len(train_labels) - sum(train_labels),
+                                           sum(train_labels)))
+    train_dataset = VideoDataset(train_files,
+                                 train_labels,
+                                 8,
+                                 224,
+                                 'cpu',
+                                 split='test',
+                                 seed=2022)
+
+    raw_train_loader = DataLoader(train_dataset, batch_size=2,
+                                  shuffle=False,
+                                  num_workers=2)
+
+    # Step 2: Get raw output
+    print("Get raw train outputs ")
+    _, labels, outputs, outputs_fts = evaluate_fn(model, raw_train_loader, device)
+
+    # Step 3: Create noisy labels
+    noisy_labels = []
+    for i in range(len(train_files)):
+        data = train_files[i]
+        video_name = data['video_name']
+
+        if 'Train' in video_name:
+            tmp_label = 0
+        else:
+            tmp_label = 1
+
+        noisy_labels += [tmp_label]
+
+    # Step 4: Run training with noisy labels
+    train_model(model, train_files, noisy_labels, device, epochs=2)
     test_model(model, test_files, device)
 
 
@@ -581,12 +646,12 @@ if __name__ == "__main__":
     os.listdir(TRAIN_FOLDER)
 
     print("Load dataset")
-    train_files = get_train_files(TRAIN_FOLDER, 8, 2)
+    train_files, train_test_files = get_train_files(TRAIN_FOLDER, 8, 2)
     test_train_files, test_files = get_test_files(TEST_FOLDER, 8, 2)
     train_files += test_train_files
+    test_files += train_test_files
 
     print("Got %i train files, %i test files" % (len(train_files), len(test_files)))
-
 
     args.num_classes = 2
 
@@ -605,10 +670,8 @@ if __name__ == "__main__":
 
     device = 'cuda'
     use_model = args.use_model
-    for t in range(2):
-        filtering_week_supervised(model, train_files, test_files, device, 0.5, use_model)
-
-
-
-
-
+    if use_model == 'baseline':
+        run_baseline(model, train_files, test_files, device)
+    else:
+        for t in range(args.n_filters):
+            filtering_week_supervised(model, train_files, test_files, device, 0.5, use_model)

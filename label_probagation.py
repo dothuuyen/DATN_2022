@@ -131,7 +131,7 @@ def label_probagation_GTN(edges_list, fts, position, labels, is_train):
     # In[100]:
 
     data_train = data_train.to(device)
-    optimizer = torch.optim.Adam(gtn.parameters(), lr=0.0001, weight_decay=1e-5)
+    optimizer = torch.optim.SGD(gtn.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
     criterion = torch.nn.BCELoss()
 
@@ -270,7 +270,7 @@ def label_probagation_GCN(edges_list, fts, position, labels, is_train):
     # In[100]:
 
     data_train = data_train.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
     criterion = torch.nn.BCELoss()
 
